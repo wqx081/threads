@@ -46,7 +46,9 @@ class Socket : public Transport {
 
   void SetLinger(bool on, int linger);
   void SetNoDelay(bool no_delay);
-  void SetConnectTimeout(int64_t ms);
+  void SetConnTimeout(int64_t ms);
+  void SetSendTimeout(int64_t ms);
+  void SetRecvTimeout(int64_t ms);
   void SetMaxRecvRetries(int64_t max_recv_retries);
   void SetKeepAlive(bool keep_alive);
 

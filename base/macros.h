@@ -8,6 +8,16 @@
 
 #include <stddef.h>  // For size_t.
 
+template<typename T>
+inline const void* const_cast_sockopt(const T* v) {
+  return reinterpret_cast<const void *>(v);
+}
+
+template<typename T>
+inline void* cast_sockopt(T* v) {
+  return reinterpret_cast<void *>(v);
+}
+
 // Put this in the declarations for a class to be uncopyable.
 #define DISALLOW_COPY(TypeName) \
   TypeName(const TypeName&) = delete
