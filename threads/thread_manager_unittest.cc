@@ -9,23 +9,6 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#define X_EQUAL_SPECIFIC_TIMEOUT(OP, timeout, x, y) do { \
-  using std::chrono::steady_clock; \
-  using std::chrono::milliseconds;  \
-  auto end = steady_clock::now() + milliseconds(timeout);  \
-  while ((x) != (y) && steady_clock::now() < end)  {} \
-  EXPECT_EQ(x, y); \
-} while (0)
-
-#define CHECK_EQUAL_SPECIFIC_TIMEOUT(timeout, x, y) \
-  X_EQUAL_SPECIFIC_TIMEOUT(EXPECT_EQ, timeout, x, y)
-
-#define REQUIRE_EQUAL_SPECIFIC_TIMEOUT(timeout, x, y) \
-  X_EQUAL_SPECIFIC_TIMEOUT(ASSERT_EQ, timeout, x, y)
-
-#define CHECK_EQUAL_TIMEOUT(x, y) CHECK_EQUAL_SPECIFIC_TIMEOUT(1000, x, y)
-#define REQUIRE_EQUAL_TIMEOUT(x, y) REQUIRE_EQUAL_SPECIFIC_TIMEOUT(1000, x, y)
-
 using namespace threads;
 using namespace base;
 
@@ -208,10 +191,87 @@ bool BlockTaskTest(int64_t /* timeout */, size_t num_workers) {
       throw Exception("Unexpected pending task count");
     }
 
+    std::shared_ptr<BlockTask> extra_task = std::make_shared<BlockTask>(monitor,
+		    bmonitor,
+		    active_counts[2]);
+
+    try {
+      thread_manager->Add(extra_task, 1);
+      throw Exception("Unexpected success adding task in excess of pending task count");
+    } catch (TooManyPendingTasksException&) {
+      throw Exception("Should have timed out adding task in excess of pending task count");
+    } catch (TimedOutException&) {
+    }
+
+    try {
+      thread_manager->Add(extra_task, -1);
+      throw Exception("Unexpected success adding task in excess of pending task coutn");
+    } catch (TimedOutException&) {
+      throw Exception("Unexpected timeout adding task in excess of pending task count");
+    } catch (TooManyPendingTasksException&) {
+    }
+
+    LOG(INFO) << "\t\t\t" << "Pending tasks " << thread_manager->PendingTaskCount();
+
+    {
+      Synchronized s(bmonitor);
+      bmonitor.NotifyAll();
+    }
+
+    {
+      Synchronized s(monitor);
+      while (active_counts[0] != 0) {
+        monitor.Wait();
+      }
+    }
+
+    LOG(INFO) << "\t\t\t" << "Pending tasks " << thread_manager->PendingTaskCount();
+
+    try {
+      thread_manager->Add(extra_task, 1);
+    } catch (TimedOutException&) {
+      LOG(INFO) << "\t\t\t"
+	        << "add timed out unexpectedly ";
+      throw Exception("Unexpected timeout adding task");
+    } catch (TooManyPendingTasksException&) {
+      LOG(INFO) << "\t\t\t"
+	        << " add encountered too many pending exepctions";
+      throw Exception("Unexpected timeout adding task");
+    }
+
+    {
+      Synchronized s(bmonitor);
+      bmonitor.NotifyAll();
+    }
+
+    {
+      Synchronized s(monitor);
+      while (active_counts[1] != 0) {
+        monitor.Wait();
+      }
+    }
+
+    {
+      Synchronized s(bmonitor);
+      bmonitor.NotifyAll();
+    }
+
+    {
+      Synchronized s(monitor);
+      while (active_counts[2] != 0) {
+        monitor.Wait();
+      }
+    }
+
+    if (!(success = (thread_manager->TotalTaskCount() == 0))) {
+      throw Exception("Unexpected pending task count");
+    }
+
   } catch (Exception& e) {
     LOG(ERROR) << "ERROR: " << e.what();  
   }
 
+  LOG(INFO) << "\t\t\t" << (success ? "Success" : "Failure");
   return success;          
 }
 

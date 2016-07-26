@@ -1,19 +1,53 @@
 #include "threads/mutex.h"
-#include "threads/mutex_impl.h"
 #include "base/time_util.h"
-
-#include <assert.h>
 #include <pthread.h>
 #include <signal.h>
-#include <errno.h>
+#include <glog/logging.h>
 
 namespace threads {
 
-int Mutex::kDefaultInitializer = PTHREAD_MUTEX_NORMAL;
-int Mutex::kRecusiveInitializer = PTHREAD_MUTEX_RECURSIVE;
+class Mutex::Impl {
+ public:
+  Impl(Initializer Init) : initialized_(false) {
+    Init(&pthread_mutex_);
+    initialized_ = true;
+  }
+  ~Impl() {
+    if (initialized_) {
+      initialized_ = false;
+      int ret = ::pthread_mutex_destroy(&pthread_mutex_);
+      DCHECK(ret == 0);
+    }
+  }
+  void Lock() const {
+    pthread_mutex_lock(&pthread_mutex_);
+  }
+  bool TryLock() const {
+    return (0 == pthread_mutex_trylock(&pthread_mutex_));
+  }
+  bool TimedLock(int milliseconds) const {
+    timespec ts;
+    base::TimeUtil::ToTimespec(ts, 
+		    milliseconds + base::TimeUtil::CurrentTime());
+    int ret = ::pthread_mutex_timedlock(&pthread_mutex_, &ts);
+    if (ret == 0) {
+      return true;
+    }
+    return false;
+  }
+  void Unlock() const {
+    ::pthread_mutex_unlock(&pthread_mutex_);
+  }
+  void* GetUnderlyingImpl() const {
+    return static_cast<void*>(&pthread_mutex_);
+  }
 
-Mutex::Mutex(int type)
-    : impl_(std::make_shared<MutexImpl>(type)) {}
+ private:
+  mutable pthread_mutex_t pthread_mutex_;
+  mutable bool initialized_;
+};
+
+Mutex::Mutex(Initializer Init) : impl_(new Mutex::Impl(Init)) {}
 
 void* Mutex::GetUnderlyingImpl() const {
   return impl_->GetUnderlyingImpl();
@@ -28,58 +62,112 @@ bool Mutex::TryLock() const {
 }
 
 bool Mutex::TimedLock(int64_t ms) const {
-  return impl_->TryLockFor(std::chrono::milliseconds {ms});
+  return impl_->TimedLock(ms);
 }
 
 void Mutex::Unlock() const {
   impl_->Unlock();
 }
 
-bool Mutex::IsLocked() const {
-  return impl_->IsLocked();
+void Mutex::DefaultInitializer(void* arg) {
+  pthread_mutex_t* mutex = static_cast<pthread_mutex_t *>(arg);
+  int ret = ::pthread_mutex_init(mutex, nullptr);
+  DCHECK(ret == 0);
 }
 
-///////////////////////////////////////////////////
-ReadWriteMutex::ReadWriteMutex()
-  : impl_(std::make_shared<RWMutexImpl>()) {}
+static void InitWithKind(pthread_mutex_t* mutex, int kind) {
+  pthread_mutexattr_t mutex_attr;
+  int ret = ::pthread_mutexattr_init(&mutex_attr);
+  DCHECK(ret == 0);
+
+  ret = ::pthread_mutexattr_settype(&mutex_attr, kind);
+  DCHECK(ret == 0);
+
+  ret = ::pthread_mutex_init(mutex, &mutex_attr);
+  DCHECK(ret == 0);
+
+  ret = ::pthread_mutexattr_destroy(&mutex_attr);
+  DCHECK(ret == 0);
+}
+
+void Mutex::AdaptiveInitializer(void* arg) {
+  InitWithKind(static_cast<pthread_mutex_t *>(arg),
+		PTHREAD_MUTEX_ADAPTIVE_NP);  
+}
+
+void Mutex::RecursiveInitializer(void* arg) {
+  InitWithKind(static_cast<pthread_mutex_t *>(arg),
+               PTHREAD_MUTEX_RECURSIVE_NP);
+}
+
+///////////////////
+class ReadWriteMutex::Impl {
+ public:
+  Impl() : initialized_(false) {
+    int ret = ::pthread_rwlock_init(&rw_lock_, nullptr);
+    DCHECK(ret == 0);
+    initialized_ = true;
+  }
+  ~Impl() {
+    if (initialized_) {
+      initialized_ = false;
+      int ret = ::pthread_rwlock_destroy(&rw_lock_);
+      DCHECK(ret == 0);
+    }
+  }
+  void AcquireRead() const {
+    ::pthread_rwlock_rdlock(&rw_lock_);
+  }
+  void AcquireWrite() const {
+    ::pthread_rwlock_wrlock(&rw_lock_);
+  }
+  bool AttemptRead() const {
+    return !::pthread_rwlock_tryrdlock(&rw_lock_);
+  }
+  bool AttemptWrite() const {
+    return !::pthread_rwlock_trywrlock(&rw_lock_);
+  }
+
+  void Release() const {
+    ::pthread_rwlock_unlock(&rw_lock_);
+  }
+
+ private:
+  mutable pthread_rwlock_t rw_lock_;
+  mutable bool initialized_;
+};
+
+ReadWriteMutex::ReadWriteMutex() : impl_(new ReadWriteMutex::Impl()) {}
 
 void ReadWriteMutex::AcquireRead() const {
-  impl_->LockShared();
+  impl_->AcquireRead();
 }
 
 void ReadWriteMutex::AcquireWrite() const {
-  impl_->Lock();
-}
-
-bool ReadWriteMutex::TimedRead(int64_t milliseconds) const {
-  return impl_->TryLockSharedFor(std::chrono::milliseconds{milliseconds});
-}
-
-bool ReadWriteMutex::TimedWrite(int64_t milliseconds) const {
-  return impl_->TryLockFor(std::chrono::milliseconds{milliseconds});
+  impl_->AcquireWrite();
 }
 
 bool ReadWriteMutex::AttemptRead() const {
-  return impl_->TryLockShared();
+  return impl_->AttemptRead();
 }
 
 bool ReadWriteMutex::AttemptWrite() const {
-  return impl_->TryLock();
+  return impl_->AttemptWrite();
 }
 
 void ReadWriteMutex::Release() const {
-  return impl_->Unlock();
+  impl_->Release();
 }
 
-///////////////////////////////////////////////////
-NoStarveReadWriteMutex::NoStarveReadWriteMutex()
-  : writer_waiting_(false) {}
+NoStarveReadWriteMutex::NoStarveReadWriteMutex() : writer_waiting_(false) {
+}
 
 void NoStarveReadWriteMutex::AcquireRead() const {
   if (writer_waiting_) {
     mutex_.Lock();
     mutex_.Unlock();
   }
+
   ReadWriteMutex::AcquireRead();
 }
 
@@ -87,37 +175,12 @@ void NoStarveReadWriteMutex::AcquireWrite() const {
   if (AttemptWrite()) {
     return;
   }
+
   mutex_.Lock();
   writer_waiting_ = true;
   ReadWriteMutex::AcquireWrite();
   writer_waiting_ = false;
   mutex_.Unlock();
-}
-
-bool NoStarveReadWriteMutex::TimedRead(int64_t milliseconds) const {
-  if (writer_waiting_) {
-    if (!mutex_.TimedLock(milliseconds)) {
-      return false;
-    }
-    mutex_.Unlock();
-  }
-  return ReadWriteMutex::TimedRead(milliseconds);
-}
-
-bool NoStarveReadWriteMutex::TimedWrite(int64_t milliseconds) const {
-  if (AttemptWrite()) {
-    return true;
-  }
-
-  if (!mutex_.TimedLock(milliseconds)) {
-    return false;
-  }
-
-  writer_waiting_ = true;
-  bool ret = ReadWriteMutex::TimedWrite(milliseconds);
-  writer_waiting_ = false;
-  mutex_.Unlock();
-  return ret;
 }
 
 } // namespace threads

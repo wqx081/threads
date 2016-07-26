@@ -48,7 +48,6 @@ class Monitor::Impl {
   }
   int WaitForTime(const timespec* abstime) const {
     assert(mutex_);
-    assert(mutex_->IsLocked());
    
     pthread_mutex_t* mutex_impl = reinterpret_cast<pthread_mutex_t *>(mutex_->GetUnderlyingImpl());
     assert(mutex_impl);
@@ -59,7 +58,6 @@ class Monitor::Impl {
   }
   int WaitForever() const {
     assert(mutex_);
-    assert(mutex_->IsLocked());
 
     pthread_mutex_t* mutex_impl = reinterpret_cast<pthread_mutex_t *>(mutex_->GetUnderlyingImpl());
     assert(mutex_impl);
@@ -67,12 +65,12 @@ class Monitor::Impl {
   }
   
   void Notify() {
-    assert(mutex_ && mutex_->IsLocked());
+    assert(mutex_ ); //mutex_->IsLocked());
     int ret = pthread_cond_signal(&pthread_cond_);
     DCHECK(ret == 0);
   }
   void NotifyAll() {
-    assert(mutex_ && mutex_->IsLocked());
+    assert(mutex_); // && mutex_->IsLocked());
  
     int ret = ::pthread_cond_broadcast(&pthread_cond_);
     DCHECK(ret == 0);
